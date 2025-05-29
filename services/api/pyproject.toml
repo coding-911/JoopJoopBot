@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "joopjoop-api"
+version = "0.1.0"
+description = "JoopJoop API Service"
+authors = ["JoopJoop Team"]
+readme = "README.md"
+packages = [{include = "joopjoop_api", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+joopjoop-core = {path = "../../packages/joopjoop-core"}
+fastapi = "^0.104.0"
+uvicorn = {extras = ["standard"], version = "^0.24.0"}
+python-dotenv = "^1.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"] 
