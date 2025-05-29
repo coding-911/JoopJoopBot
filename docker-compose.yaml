@@ -1,0 +1,133 @@
+x-airflow-common: &airflow-common
+  build: 
+    context: .
+    dockerfile: services/airflow/Dockerfile
+    args:
+      PYTHON_VERSION: "3.11"
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR:-LocalExecutor}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES:-false}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-your-secret-key-here}
+    DART_API_KEY: ${DART_API_KEY}
+    VECTOR_DB_PATH: ${VECTOR_DB_PATH:-/opt/airflow/vector_store}
+  volumes:
+    - ./services/airflow/dags:/opt/airflow/dags
+    - ./services/airflow/logs:/opt/airflow/logs
+    - ./services/airflow/plugins:/opt/airflow/plugins
+    - ./services/airflow/vector_store:/opt/airflow/vector_store
+    - ./packages/joopjoop-core:/packages/joopjoop-core:ro
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  redis:
+    image: redis:latest
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+    volumes:
+      - redis-data:/data
+    restart: always
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - DART_API_KEY=${DART_API_KEY}
+      - VECTOR_DB_PATH=${VECTOR_DB_PATH:-/app/data/vector_store}
+      - POSTGRES_USER=${POSTGRES_USER:-joopjoop}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-joopjoop}
+      - POSTGRES_HOST=${POSTGRES_HOST:-db}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+    volumes:
+      - ./services/api:/app
+      - ./packages/joopjoop-core:/packages/joopjoop-core:ro
+    depends_on:
+      - postgres
+      - redis
+
+  web:
+    build:
+      context: .
+      dockerfile: services/web/Dockerfile
+    ports:
+      - "${VITE_PORT:-5173}:5173"
+    volumes:
+      - ./services/web:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:${API_PORT:-8000}
+    depends_on:
+      - api
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:${AIRFLOW_PORT:-8080}/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        exec airflow db init
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    depends_on:
+      - postgres
+
+volumes:
+  postgres-db-volume:
+  redis-data:
+  grafana-storage: 
