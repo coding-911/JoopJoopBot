@@ -1,22 +1,27 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
 [tool.poetry]
 name = "joopjoop-core"
 version = "0.1.0"
 description = "JoopJoop Core Package"
-authors = ["JoopJoop Team"]
-readme = "README.md"
-packages = [{include = "joopjoop", from = "src"}]
+authors = ["Your Name <your.email@example.com>"]
+packages = [
+    { include = "joopjoop", from = "src" }
+]
 
 [tool.poetry.dependencies]
 python = "^3.10"
-httpx = "^0.25.0"
 beautifulsoup4 = "^4.12.0"
-pandas = "^2.1.0"
-langchain = "^0.0.350"
-chromadb = "^0.4.0"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+faiss-cpu = "^1.8.0"
+httpx = "^0.28.0"
+langchain = "^0.1.0"
+langchain-community = "^0.0.24"
+langchain-core = "^0.1.27"
+lxml = "^5.1.0"
+pandas = "^2.2.0"
+sentence-transformers = "^4.1.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
