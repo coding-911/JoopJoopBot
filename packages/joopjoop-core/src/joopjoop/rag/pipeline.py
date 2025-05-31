@@ -1,17 +1,38 @@
 import logging
+import os
 from typing import List, Dict, Optional
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 import re
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 class RAGPipeline:
     """RAG (Retrieval-Augmented Generation) 파이프라인"""
     
-    def __init__(self):
-        """RAG 파이프라인 초기화"""
+    def __init__(self, vector_store_path: Optional[str] = None):
+        """
+        RAG 파이프라인 초기화
+        
+        Args:
+            vector_store_path: 벡터 DB 저장 경로. None인 경우 환경변수에서 가져옴
+        """
+        # 벡터 DB 경로 설정
+        self.vector_store_path = vector_store_path or os.getenv("VECTOR_STORE_PATH")
+        if not self.vector_store_path:
+            raise ValueError(
+                "벡터 DB 경로가 설정되지 않았습니다. "
+                "vector_store_path 파라미터를 전달하거나 VECTOR_STORE_PATH 환경변수를 설정해주세요."
+            )
+        
+        # 벡터 DB 디렉토리 생성
+        Path(self.vector_store_path).mkdir(parents=True, exist_ok=True)
+        
         # 임베딩 모델 초기화
         self.model = SentenceTransformer('jhgan/ko-sroberta-multitask')
         
@@ -23,6 +44,49 @@ class RAGPipeline:
         self.chunks = []
         self.chunk_metadata = []
         
+        # 인덱스 파일 경로
+        self.index_path = Path(self.vector_store_path) / "index.faiss"
+        self.chunks_path = Path(self.vector_store_path) / "chunks.npz"
+        
+        # 기존 인덱스가 있으면 로드
+        self._load_index()
+    
+    def _load_index(self):
+        """저장된 인덱스와 청크 로드"""
+        try:
+            if self.index_path.exists() and self.chunks_path.exists():
+                # FAISS 인덱스 로드
+                self.index = faiss.read_index(str(self.index_path))
+                
+                # 청크와 메타데이터 로드
+                data = np.load(str(self.chunks_path), allow_pickle=True)
+                self.chunks = data['chunks'].tolist()
+                self.chunk_metadata = data['metadata'].tolist()
+                
+                logger.info(f"기존 인덱스 로드 완료: {len(self.chunks)}개 청크")
+        except Exception as e:
+            logger.warning(f"기존 인덱스 로드 실패, 새로운 인덱스 생성: {str(e)}")
+            self.index = faiss.IndexFlatIP(self.embedding_size)
+            self.chunks = []
+            self.chunk_metadata = []
+    
+    def _save_index(self):
+        """인덱스와 청크 저장"""
+        try:
+            # FAISS 인덱스 저장
+            faiss.write_index(self.index, str(self.index_path))
+            
+            # 청크와 메타데이터 저장
+            np.savez(
+                str(self.chunks_path),
+                chunks=np.array(self.chunks, dtype=object),
+                metadata=np.array(self.chunk_metadata, dtype=object)
+            )
+            
+            logger.info(f"인덱스 저장 완료: {len(self.chunks)}개 청크")
+        except Exception as e:
+            logger.error(f"인덱스 저장 실패: {str(e)}")
+
     def split_into_chunks(self, text: str, min_chunk_size: int = 100, max_chunk_size: int = 512) -> List[str]:
         """
         텍스트를 의미 있는 청크로 분할
@@ -116,6 +180,9 @@ class RAGPipeline:
         # 청크와 메타데이터 저장
         self.chunks.extend(chunks)
         self.chunk_metadata.extend([metadata] * len(chunks))
+        
+        # 인덱스 저장
+        self._save_index()
         
         logger.debug(f"문서 처리 완료: {len(chunks)}개 청크 추가됨")
         

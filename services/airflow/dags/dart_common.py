@@ -5,11 +5,13 @@ from typing import List, Dict
 import logging
 
 from joopjoop.dart import DartClient
+from joopjoop.dart.corp_manager import CorpManager
 from joopjoop.rag import RAGPipeline
 
 # 환경변수
 DART_API_KEY = os.getenv("DART_API_KEY")
 VECTOR_STORE_PATH = os.getenv("VECTOR_DB_PATH", "/opt/airflow/vector_store")
+CORPS_DB_PATH = os.getenv("CORPS_DB_PATH", "/opt/airflow/data/corps.db")
 ALERT_EMAIL = os.getenv("AIRFLOW_ALERT_EMAIL")
 
 # 보고서 타입 그룹
@@ -56,14 +58,30 @@ default_args = {
     'retry_delay': timedelta(minutes=int(os.getenv("AIRFLOW_RETRY_DELAY_MINUTES", "5"))),
 }
 
-async def fetch_corps() -> List[Dict]:
-    """기업 목록 조회"""
+async def update_corps() -> None:
+    """기업 목록 업데이트"""
     client = DartClient(DART_API_KEY)
-    return await client.get_corp_codes()
+    corp_manager = CorpManager(CORPS_DB_PATH)
+    
+    try:
+        corps = await client.get_corp_codes()
+        corp_manager.upsert_corps(corps)
+        logger.info(f"기업 목록 업데이트 완료: {len(corps)}개 기업")
+    except Exception as e:
+        logger.error(f"기업 목록 업데이트 실패: {str(e)}")
+        raise
 
-async def fetch_disclosures(corp_code: str, report_group: str) -> List[Dict]:
+def get_corps(only_listed: bool = False) -> List[Dict]:
+    """기업 목록 조회"""
+    corp_manager = CorpManager(CORPS_DB_PATH)
+    corps = corp_manager.get_all_corps(only_listed=only_listed)
+    logger.info(f"기업 목록 조회 완료: {len(corps)}개 기업")
+    return corps
+
+async def fetch_disclosures(corp: Dict, report_group: str) -> List[Dict]:
     """공시 목록 및 상세 조회"""
     client = DartClient(DART_API_KEY)
+    corp_manager = CorpManager(CORPS_DB_PATH)
     
     try:
         # 보고서 그룹에 따른 수집 기간 설정
@@ -73,7 +91,7 @@ async def fetch_disclosures(corp_code: str, report_group: str) -> List[Dict]:
         
         # 공시 목록 조회
         disclosures = await client.get_disclosure_list(
-            corp_code=corp_code,
+            corp_code=corp['corp_code'],
             start_date=start_date,
             end_date=end_date
         )
@@ -96,16 +114,23 @@ async def fetch_disclosures(corp_code: str, report_group: str) -> List[Dict]:
                         disc.get('report_tp'), '기타'
                     )
                     document['collection_group'] = report_group
+                    document['corp_name'] = corp['corp_name']
+                    document['corp_code'] = corp['corp_code']
+                    document['stock_code'] = corp.get('stock_code')
                     results.append(document)
                     logger.info(f"문서 수집 성공: {disc.get('report_nm')} ({disc.get('rcept_no')})")
             except Exception as e:
                 logger.error(f"문서 수집 실패: {disc.get('rcept_no')} - {str(e)}")
                 continue
         
+        # 수집 완료 시간 업데이트
+        if results:
+            corp_manager.update_collection_timestamp(corp['corp_code'])
+        
         return results
     
     except Exception as e:
-        logger.error(f"기업 공시 목록 조회 실패 (기업코드: {corp_code}): {str(e)}")
+        logger.error(f"기업 공시 목록 조회 실패 (기업: {corp['corp_name']}): {str(e)}")
         return []
 
 def process_documents(documents: List[Dict]) -> None:
@@ -118,18 +143,18 @@ def process_documents(documents: List[Dict]) -> None:
         except Exception as e:
             logger.error(f"문서 처리 실패: {doc.get('title')} - {str(e)}")
 
-def run_fetch_corps():
-    """기업 목록 조회 실행"""
-    corps = asyncio.run(fetch_corps())
-    return [corp['corp_code'] for corp in corps]
+def run_update_corps():
+    """기업 목록 업데이트 실행"""
+    asyncio.run(update_corps())
 
-def run_fetch_disclosures(corp_codes: List[str], report_group: str):
+def run_fetch_disclosures(report_group: str, only_listed: bool = False):
     """공시 조회 및 처리 실행"""
-    for corp_code in corp_codes:
+    corps = get_corps(only_listed=only_listed)
+    for corp in corps:
         try:
-            documents = asyncio.run(fetch_disclosures(corp_code, report_group))
+            documents = asyncio.run(fetch_disclosures(corp, report_group))
             if documents:
                 process_documents(documents)
-                logger.info(f"기업 데이터 수집 완료: {corp_code} (그룹: {report_group})")
+                logger.info(f"기업 데이터 수집 완료: {corp['corp_name']} (그룹: {report_group})")
         except Exception as e:
-            logger.error(f"기업 데이터 수집 실패: {corp_code} - {str(e)}") 
+            logger.error(f"기업 데이터 수집 실패: {corp['corp_name']} - {str(e)}") 

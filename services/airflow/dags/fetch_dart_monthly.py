@@ -3,7 +3,7 @@ from airflow.operators.python import PythonOperator
 
 from dart_common import (
     default_args,
-    run_fetch_corps,
+    run_update_corps,
     run_fetch_disclosures
 )
 
@@ -14,18 +14,20 @@ with DAG(
     schedule_interval='0 0 1 * *',  # 매월 1일
     catchup=False
 ) as dag:
-    fetch_corps_task = PythonOperator(
-        task_id='fetch_corps',
-        python_callable=run_fetch_corps,
+    # 1. 전체 기업 목록 업데이트
+    update_corps_task = PythonOperator(
+        task_id='update_corps',
+        python_callable=run_update_corps,
     )
     
+    # 2. 전체 기업의 월간 보고서 수집
     fetch_disclosures_task = PythonOperator(
         task_id='fetch_disclosures',
         python_callable=run_fetch_disclosures,
         op_kwargs={
-            'corp_codes': "{{ task_instance.xcom_pull(task_ids='fetch_corps') }}",
-            'report_group': 'monthly'
+            'report_group': 'monthly',
+            'only_listed': False  # 전체 기업 대상
         },
     )
     
-    fetch_corps_task >> fetch_disclosures_task 
+    update_corps_task >> fetch_disclosures_task 
