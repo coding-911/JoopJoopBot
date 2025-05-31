@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Airflow
+logs/
+airflow.cfg
+airflow.db
+webserver_config.py
+airflow-webserver.pid
+standalone_admin_password.txt
+vector_store/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+tests/
+
+# Logs
+*.log
+
+# Local development
+.git
+.gitignore
+README.md
+
+# Docker
+Dockerfile
+.dockerignore

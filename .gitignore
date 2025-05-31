@@ -112,3 +112,6 @@ build/
 *~
 .DS_Store
 Thumbs.db 
+
+# PR 문서
+pr/
