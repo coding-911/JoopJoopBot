@@ -21,6 +21,12 @@ graph TB
         Error["에러 처리"]
     end
 
+    subgraph CorpDB["기업 정보 관리"]
+        Manager["CorpManager"]
+        SQLite[("SQLite DB")]
+        Listed["상장기업<br/>필터링"]
+    end
+
     subgraph Data["수집 데이터"]
         Corps["기업 목록<br/>(기업코드/기업명)"]
         Discs["공시 목록<br/>(접수번호/제목)"]
@@ -49,6 +55,12 @@ graph TB
     Monthly --> |"응답"| Error
     Historical --> |"응답"| Error
     Error --> |"재시도"| Common
+    
+    Monthly --> |"기업목록"| Manager
+    Manager --> SQLite
+    SQLite --> Listed
+    Listed --> |"상장기업"| Daily
+    Listed --> |"상장기업"| Weekly
     
     Daily --> |"파싱"| Corps
     Weekly --> |"파싱"| Corps
@@ -91,7 +103,20 @@ graph TB
   - XML 파싱 오류 처리
   - ZIP 파일 처리
 
-### 2. RAG 파이프라인 (`joopjoop.rag.pipeline`)
+### 2. CorpManager (`joopjoop.dart.corp_manager`)
+
+- **역할**: 기업 정보 관리 및 상장기업 필터링
+- **주요 기능**:
+  - SQLite DB 기반 기업 정보 관리
+  - 상장/비상장 기업 구분
+  - 기업 정보 CRUD 작업
+  - 마지막 수집 시간 추적
+- **성능 최적화**:
+  - 인덱스 활용
+  - 배치 업데이트 지원
+  - 캐시 적용
+
+### 3. RAG 파이프라인 (`joopjoop.rag.pipeline`)
 
 - **역할**: 공시 문서의 처리 및 저장
 - **주요 기능**:
@@ -105,7 +130,19 @@ graph TB
 
 ## 데이터 모델
 
-### 1. 메타데이터 스키마
+### 1. 기업 정보 스키마
+
+```sql
+CREATE TABLE corps (
+    corp_code TEXT PRIMARY KEY,  -- 기업고유번호
+    corp_name TEXT NOT NULL,     -- 기업명
+    stock_code TEXT,             -- 종목코드
+    is_listed BOOLEAN,           -- 상장여부
+    last_updated TEXT            -- 마지막 수집 시간
+);
+```
+
+### 2. 메타데이터 스키마
 
 ```json
 {
@@ -131,7 +168,7 @@ graph TB
 }
 ```
 
-### 2. 임베딩 설정
+### 3. 임베딩 설정
 
 - **모델**: `jhgan/ko-sroberta-multitask`
 - **차원**: 768
@@ -140,20 +177,50 @@ graph TB
 
 ## 구현 세부사항
 
-### 1. 데이터 수집 프로세스
+### 1. 기업 정보 관리
+
+```python
+# corp_manager.py
+class CorpManager:
+    def __init__(self, db_path: str):
+        """기업 정보 관리자 초기화"""
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        """DB 초기화"""
+        pass
+
+    async def update_corps(self, corps: List[Dict]) -> int:
+        """기업 정보 일괄 업데이트"""
+        pass
+
+    def get_listed_corps(self) -> List[Dict]:
+        """상장기업 목록 조회"""
+        pass
+
+    def get_corp_by_code(self, corp_code: str) -> Optional[Dict]:
+        """기업 정보 조회"""
+        pass
+
+### 2. 데이터 수집 프로세스
 
 ```python
 # dart_common.py - 공통 모듈
 class DartCommon:
-    def fetch_corps(self):
+    def __init__(self, api_key: str, corp_manager: CorpManager):
+        self.api_key = api_key
+        self.corp_manager = corp_manager
+
+    async def fetch_corps(self):
         """기업 목록 수집"""
         pass
 
-    def fetch_disclosures(self, corp_code: str, start_date: str, end_date: str):
+    async def fetch_disclosures(self, corp_code: str, start_date: str, end_date: str):
         """공시 목록 수집"""
         pass
 
-    def collect_document(self, rcept_no: str):
+    async def collect_document(self, rcept_no: str):
         """공시 원문 수집"""
         pass
 
@@ -179,7 +246,7 @@ class DartHistoricalCollector(DartCommon):
     pass
 ```
 
-### 2. 문서 처리 파이프라인
+### 3. 문서 처리 파이프라인
 
 ```python
 class DocumentProcessor:
@@ -204,13 +271,16 @@ class DocumentProcessor:
 
 ## 저장소 관리
 
-### 1. 백업 전략
+### 1. SQLite DB 관리
+- 주기적 백업
+- 인덱스 최적화
+- VACUUM 적용
+
+### 2. 벡터 DB 관리
 - 일일 증분 백업
 - 주간 전체 백업
 - 30일 보관 정책
-
-### 2. 인덱스 최적화
-- 주기적 인덱스 재구축
+- 인덱스 최적화
 - 임베딩 압축 적용
 - 캐시 활용
 
@@ -231,11 +301,15 @@ poetry install
 # .env
 DART_API_KEY=your_api_key
 VECTOR_DB_PATH=/path/to/vector/store
+SQLITE_DB_PATH=/path/to/sqlite/db
 AIRFLOW_ALERT_EMAIL=alerts@example.com  # 알림 설정용
 ```
 
 3. 테스트 실행
 ```bash
+# 기업 정보 관리 테스트
+poetry run pytest tests/test_corp_manager.py
+
 # 공통 모듈 테스트
 poetry run pytest tests/dags/test_dart_common.py
 
