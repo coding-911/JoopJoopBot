@@ -11,19 +11,25 @@ RUN apt-get update && \
 # Poetry 설치
 RUN pip install --no-cache-dir poetry
 
+# 깨진 virtualenv 제거 (중요!)
+RUN rm -rf /app/.venv
+
 # joopjoop-core 패키지 복사 및 설치
 COPY packages/joopjoop-core /packages/joopjoop-core
-RUN pip install -e /packages/joopjoop-core
+RUN cd /packages/joopjoop-core && pip install -e .
 
 # API 서비스 의존성 파일 복사
-COPY services/api/pyproject.toml services/api/poetry.lock ./
+COPY services/backend/pyproject.toml services/backend/poetry.lock ./
 
 # 의존성 설치
 RUN poetry config virtualenvs.create false \
     && poetry install --no-root --no-interaction --no-ansi
 
 # 소스 코드 복사
-COPY services/api/src ./src
+COPY services/backend/app ./app
+
+# Python 패키지 경로 설정
+ENV PYTHONPATH=/app:/packages/joopjoop-core/src
 
 # 실행
-CMD ["poetry", "run", "uvicorn", "src.joopjoop_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] 
+CMD ["poetry", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] 
