@@ -15,13 +15,15 @@ packages = [
 python = "^3.11"
 beautifulsoup4 = "^4.12.0"
 faiss-cpu = "^1.8.0"
-httpx = "^0.28.0"
+httpx = {extras = ["http2"], version = "^0.28.0"}
+idna = "^3.6"
 langchain = "^0.1.0"
 langchain-community = "^0.0.24"
 langchain-core = "^0.1.27"
 lxml = "^5.1.0"
 pandas = "^2.2.0"
 sentence-transformers = "^4.1.0"
+python-dotenv = "^1.0.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
