@@ -6,7 +6,6 @@
 - Python 3.11+
 - Node.js 18+
 - Poetry (Python 패키지 관리자)
-- pnpm (Node.js 패키지 관리자)
 
 ## 프로젝트 구조
 
@@ -18,14 +17,23 @@ JoopJoopBot/
 │   ├── airflow/            # Airflow 서비스
 │   │   ├── dags/          # Airflow DAG 파일들
 │   │   └── Dockerfile     # Airflow 컨테이너 설정
-│   ├── api/               # 백엔드 API 서비스
-│   └── web/               # 프론트엔드 서비스
-└── docker-compose.yaml     # 전체 서비스 구성
+│   ├── backend/           # 백엔드 API 서비스
+│   │   └── Dockerfile     # 백엔드 컨테이너 설정
+│   └── frontend/          # 프론트엔드 서비스
+│       └── Dockerfile     # 프론트엔드 컨테이너 설정
+├── docker-compose.yaml     # 전체 서비스 구성
+└── pyproject.toml         # Poetry 프로젝트 설정
 ```
 
 ## 1. 기본 환경 설정
 
-### 1.1 Python 3.11 설치 (Ubuntu/WSL)
+### 1.1 Python 3.11 설치
+
+#### Windows
+1. [Python 3.11 공식 사이트](https://www.python.org/downloads/)에서 설치
+2. 설치 시 "Add Python to PATH" 옵션 선택
+
+#### Ubuntu/WSL
 ```bash
 # Python 3.11 저장소 추가 및 설치
 sudo add-apt-repository ppa:deadsnakes/ppa
@@ -34,24 +42,52 @@ sudo apt install python3.11 python3.11-venv python3.11-dev
 
 # pip 설치 (Python 3.11용)
 curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+```
 
-# Poetry 설치 (Python 3.11로)
+### 1.2 Poetry 설치
+
+#### Windows (PowerShell)
+```powershell
+(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | python -
+```
+
+#### Ubuntu/WSL
+```bash
 curl -sSL https://install.python-poetry.org | python3.11 -
 ```
 
-### 1.2 Node.js 및 pnpm 설치
+### 1.3 Node.js 설치
+
+#### Windows
+1. [Node.js 18.x LTS 버전](https://nodejs.org/) 다운로드 및 설치
+
+#### Ubuntu/WSL
 ```bash
 # Node.js 18.x 설치
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
 sudo apt install -y nodejs
-
-# pnpm 설치
-npm install -g pnpm
 ```
 
-## 2. 환경 변수 설정
+## 2. 프로젝트 설정
 
-루트 디렉토리에 .env 파일 생성:
+### 2.1 프로젝트 클론
+```bash
+git clone https://github.com/your-username/JoopJoopBot.git
+cd JoopJoopBot
+```
+
+### 2.2 Poetry 환경 설정
+```bash
+# Poetry 가상 환경 생성 및 의존성 설치
+poetry install
+
+# 가상 환경 활성화
+poetry shell
+```
+
+### 2.3 환경 변수 설정
+
+`.env` 파일 생성:
 ```bash
 # 서비스 포트 설정
 API_PORT=8000
@@ -66,9 +102,12 @@ DART_API_KEY=your_dart_api_key_here
 
 # 데이터베이스 설정
 POSTGRES_USER=joopjoop
-POSTGRES_PASSWORD=your_postgres_password
-POSTGRES_DB=your_postgres_db
-POSTGRES_HOST=db
+POSTGRES_PASSWORD=your_secure_password
+POSTGRES_DB=joopjoop
+POSTGRES_HOST=postgres
+
+# Redis 설정
+REDIS_PASSWORD=your_redis_password
 
 # 벡터 DB 설정
 VECTOR_DB_PATH=/app/data/vector_store
@@ -78,68 +117,12 @@ AIRFLOW_UID=50000
 AIRFLOW__CORE__LOAD_EXAMPLES=false
 AIRFLOW__CORE__EXECUTOR=LocalExecutor
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-AIRFLOW__WEBSERVER__SECRET_KEY=your-secret-key-here
-AIRFLOW_ALERT_EMAIL=your-email@example.com
-AIRFLOW_TASK_RETRIES=1
-AIRFLOW_RETRY_DELAY_MINUTES=5
+AIRFLOW__WEBSERVER__SECRET_KEY=your_secure_secret_key
 ```
 
-### 환경 변수 설명
+## 3. 서비스 실행
 
-1. **서비스 포트**
-   - `API_PORT`: FastAPI 서버 포트 (기본값: 8000)
-   - `VITE_PORT`: 프론트엔드 개발 서버 포트 (기본값: 5173)
-   - `POSTGRES_PORT`: PostgreSQL 포트 (기본값: 5432)
-   - `AIRFLOW_PORT`: Airflow 웹 UI 포트 (기본값: 8080)
-   - `REDIS_PORT`: Redis 캐시 서버 포트 (기본값: 6379)
-   - `GRAFANA_PORT`: Grafana 대시보드 포트 (기본값: 3000)
-
-2. **DART API**
-   - `DART_API_KEY`: DART OpenAPI 인증키 (필수)
-
-3. **데이터베이스**
-   - `POSTGRES_USER`: PostgreSQL 사용자명
-   - `POSTGRES_PASSWORD`: PostgreSQL 비밀번호
-   - `POSTGRES_DB`: 데이터베이스 이름
-   - `POSTGRES_HOST`: 데이터베이스 호스트
-
-4. **벡터 DB**
-   - `VECTOR_DB_PATH`: 벡터 DB 저장 경로
-     - API 서비스: /app/data/vector_store
-     - Airflow: /opt/airflow/vector_store
-
-5. **Airflow**
-   - `AIRFLOW_UID`: Airflow 사용자 ID
-   - `AIRFLOW_ALERT_EMAIL`: 알림 수신 이메일
-   - `AIRFLOW_TASK_RETRIES`: 작업 재시도 횟수
-   - `AIRFLOW_RETRY_DELAY_MINUTES`: 재시도 간격(분)
-
-## 3. 서비스 설정 및 실행
-
-### 3.1 코어 패키지 설치
-```bash
-cd packages/joopjoop-core
-poetry env use python3.11
-poetry install
-poetry build
-cd ../..
-```
-
-### 3.2 서비스별 의존성 설치
-```bash
-# API 서버
-cd services/api
-poetry env use python3.11
-poetry install
-cd ../..
-
-# 프론트엔드
-cd services/web
-pnpm install
-cd ../..
-```
-
-### 3.3 Docker 서비스 실행
+### 3.1 Docker 서비스 실행
 ```bash
 # 전체 서비스 빌드 및 시작
 docker compose up --build -d
@@ -151,16 +134,47 @@ docker compose ps
 docker compose logs -f
 ```
 
-## 4. 서비스 접속 정보
+### 3.2 서비스 접속
 
-- API 서버: http://localhost:8000
-  - API 문서: http://localhost:8000/docs
-- 프론트엔드: http://localhost:3000
-- Airflow 웹 UI: http://localhost:8080 (기본 계정: airflow / airflow)
+- 백엔드 API: http://localhost:8000
+  - Swagger 문서: http://localhost:8000/docs
+- 프론트엔드: http://localhost:5173
+- Airflow: http://localhost:8080
+  - 기본 계정: airflow / airflow
+- Grafana: http://localhost:3000
+  - 기본 계정: admin / admin
 
-## 5. 문제 해결 가이드
+## 4. 개발 가이드
 
-### Docker 관련 문제
+### 4.1 백엔드 개발
+```bash
+cd services/backend
+
+# 의존성 설치
+poetry install
+
+# 개발 서버 실행
+poetry run uvicorn app.main:app --reload
+```
+
+### 4.2 프론트엔드 개발
+```bash
+cd services/frontend
+
+# 의존성 설치
+npm install
+
+# 개발 서버 실행
+npm run dev
+```
+
+### 4.3 Airflow DAG 개발
+- `services/airflow/dags/` 디렉토리에 DAG 파일 추가
+- Python 패키지 추가 시 `services/airflow/requirements.txt` 수정
+
+## 5. 문제 해결
+
+### 5.1 Docker 관련 문제
 ```bash
 # 컨테이너 상태 확인
 docker compose ps
@@ -176,20 +190,36 @@ docker compose down
 docker compose up --build -d
 ```
 
-### Poetry 관련 문제
-- Permission 에러: `sudo` 사용 또는 사용자 권한 확인
-- 환경 문제: `poetry env list` 로 현재 환경 확인
+### 5.2 Poetry 관련 문제
+- 가상 환경 확인: `poetry env list`
 - 캐시 정리: `poetry cache clear . --all`
+- 의존성 업데이트: `poetry update`
 
-## 6. 개발 시 유의사항
+### 5.3 데이터베이스 관련 문제
+```bash
+# PostgreSQL 컨테이너 접속
+docker compose exec postgres psql -U joopjoop -d joopjoop
 
-1. 코어 패키지 수정 시
-   - `packages/joopjoop-core`에서 수정 후 `poetry install`
+# 데이터베이스 초기화
+docker compose down -v
+docker compose up -d
+```
 
-2. API 엔드포인트 추가 시
-   - `services/api/src/joopjoop_api/routers/` 디렉토리에 라우터 추가
-   - `main.py`에 라우터 등록
+## 6. 배포 가이드
 
-3. DAG 개발 시
-   - `services/airflow/dags/` 디렉토리에 DAG 추가
-   - Python 패키지 추가 시 `services/airflow/requirements.txt` 수정 
+### 6.1 프로덕션 환경 설정
+- `.env.prod` 파일 생성
+- 보안 관련 환경 변수 설정
+  - `POSTGRES_PASSWORD`
+  - `REDIS_PASSWORD`
+  - `AIRFLOW__WEBSERVER__SECRET_KEY`
+  - `GRAFANA_ADMIN_PASSWORD`
+
+### 6.2 프로덕션 배포
+```bash
+# 프로덕션 환경 변수 사용
+cp .env.prod .env
+
+# 서비스 실행
+docker compose -f docker-compose.prod.yaml up -d
+``` 
