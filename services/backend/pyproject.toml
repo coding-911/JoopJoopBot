@@ -95,4 +95,4 @@ addopts = "-v --cov=app --cov-report=term-missing"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning",
-] 
+]
