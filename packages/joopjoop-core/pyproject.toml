@@ -24,7 +24,12 @@ lxml = "^5.1.0"
 pandas = "^2.2.0"
 sentence-transformers = "^4.1.0"
 python-dotenv = "^1.0.0"
+pytest = "^7.0"
+psycopg2-binary = "^2.9.9"
+
+[tool.poetry.group.dev.dependencies]
+pytest-asyncio = "^0.23.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"] 
+python_files = ["test_*.py"]

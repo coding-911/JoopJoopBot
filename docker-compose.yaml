@@ -5,12 +5,20 @@ x-airflow-common: &airflow-common
     args:
       PYTHON_VERSION: "3.11"
   environment: &airflow-common-env
-    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR:-LocalExecutor}
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
-    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES:-false}
-    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-your-secret-key-here}
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    AIRFLOW_ALERT_EMAIL: ${AIRFLOW_ALERT_EMAIL}
+    AIRFLOW_TASK_RETRIES: ${AIRFLOW_TASK_RETRIES}
+    AIRFLOW_RETRY_DELAY_MINUTES: ${AIRFLOW_RETRY_DELAY_MINUTES}
+    AIRFLOW_UID: ${AIRFLOW_UID}
     DART_API_KEY: ${DART_API_KEY}
-    VECTOR_DB_PATH: ${VECTOR_DB_PATH:-/opt/airflow/vector_store}
+    VECTOR_DB_PATH: ${AIRFLOW_VECTOR_DB_PATH}
+    POSTGRES_HOST: ${POSTGRES_HOST}
+    POSTGRES_USER: ${AIRFLOW_POSTGRES_USER}
+    POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD}
+    POSTGRES_DB: ${AIRFLOW_POSTGRES_DB}
+    LOG_LEVEL: ${LOG_LEVEL}
   volumes:
     - ./services/airflow/dags:/opt/airflow/dags
     - ./services/airflow/logs:/opt/airflow/logs
@@ -25,15 +33,28 @@ services:
   postgres:
     image: postgres:13
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-airflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
-      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+      # API DB (기본 DB)
+      POSTGRES_USER: ${API_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${API_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${API_POSTGRES_DB}
+      # 다중 DB 설정
+      POSTGRES_MULTIPLE_DATABASES: ${API_POSTGRES_DB},${AIRFLOW_POSTGRES_DB},${TEST_API_POSTGRES_DB},${TEST_AIRFLOW_POSTGRES_DB}
+      # Airflow DB 사용자 정보
+      AIRFLOW_POSTGRES_USER: ${AIRFLOW_POSTGRES_USER}
+      AIRFLOW_POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD}
+      AIRFLOW_POSTGRES_DB: ${AIRFLOW_POSTGRES_DB}
+      # 테스트 DB 사용자 정보
+      TEST_POSTGRES_USER: ${TEST_POSTGRES_USER}
+      TEST_POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD}
+      TEST_API_POSTGRES_DB: ${TEST_API_POSTGRES_DB}
+      TEST_AIRFLOW_POSTGRES_DB: ${TEST_AIRFLOW_POSTGRES_DB}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+      - ./scripts/postgres:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      test: ["CMD", "pg_isready", "-U", "${API_POSTGRES_USER}"]
       interval: 5s
       retries: 5
     restart: always
@@ -41,9 +62,9 @@ services:
   redis:
     image: redis:latest
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_PORT}:6379"
     environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     volumes:
       - redis-data:/data
     restart: always
@@ -53,18 +74,22 @@ services:
       context: .
       dockerfile: services/backend/Dockerfile
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${API_PORT}:8000"
     environment:
+      - API_HOST=${API_HOST}
       - DART_API_KEY=${DART_API_KEY}
-      - VECTOR_DB_PATH=${VECTOR_DB_PATH:-/app/data/vector_store}
-      - POSTGRES_USER=${POSTGRES_USER:-joopjoop}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB:-joopjoop}
-      - POSTGRES_HOST=${POSTGRES_HOST:-db}
-      - REDIS_HOST=${REDIS_HOST:-redis}
-      - REDIS_PORT=${REDIS_PORT:-6379}
+      - VECTOR_DB_PATH=${API_VECTOR_DB_PATH}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_USER=${API_POSTGRES_USER}
+      - POSTGRES_PASSWORD=${API_POSTGRES_PASSWORD}
+      - POSTGRES_DB=${API_POSTGRES_DB}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL}
     volumes:
       - ./services/backend:/app
+      - ./data/vector_store:/data/vector_store
       - ./packages/joopjoop-core:/packages/joopjoop-core:ro
     depends_on:
       - postgres
@@ -75,12 +100,12 @@ services:
       context: .
       dockerfile: services/web/Dockerfile
     ports:
-      - "${VITE_PORT:-5173}:5173"
+      - "${VITE_PORT}:5173"
     volumes:
       - ./services/web:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:${API_PORT:-8000}
+      - REACT_APP_API_URL=${REACT_APP_API_URL}
     depends_on:
       - api
 
@@ -88,9 +113,9 @@ services:
     <<: *airflow-common
     command: webserver
     ports:
-      - "${AIRFLOW_PORT:-8080}:8080"
+      - "${AIRFLOW_PORT}:8080"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:${AIRFLOW_PORT:-8080}/health"]
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 10s
       timeout: 10s
       retries: 5
@@ -119,11 +144,11 @@ services:
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "${GRAFANA_PORT}:3000"
     volumes:
       - grafana-storage:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
     depends_on:
       - postgres
 
