@@ -1,112 +1,85 @@
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional
 import psycopg2
-import sqlite3
 from psycopg2.extras import DictCursor
 from datetime import datetime
 import logging
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 class CorpManager:
     """기업 정보 관리 클래스"""
     
-    def __init__(self, db_url: Union[str, Dict]):
+    def __init__(self, db_config: Dict):
         """
         Args:
-            db_url: DB 연결 정보
-                - PostgreSQL: Dict 형태의 연결 설정
-                    {
-                        'host': str,
-                        'dbname': str,
-                        'user': str,
-                        'password': str,
-                        'port': int
-                    }
-                - SQLite: 'sqlite:///path/to/db.sqlite' 형태의 URL
+            db_config: PostgreSQL 연결 설정
+                {
+                    'host': str,
+                    'dbname': str,
+                    'user': str,
+                    'password': str,
+                    'port': int
+                }
         """
-        self.db_url = db_url
+        self.db_config = db_config
         self._init_db()
     
-    def _get_connection(self):
-        """DB 연결 생성"""
-        if isinstance(self.db_url, dict):
-            # PostgreSQL
-            return psycopg2.connect(**self.db_url)
-        else:
-            # SQLite
-            if isinstance(self.db_url, str):
-                if self.db_url.startswith('sqlite:///'):
-                    db_path = self.db_url[10:]  # Remove 'sqlite:///'
-                else:
-                    db_path = self.db_url
-                return sqlite3.connect(db_path)
-            else:
-                raise ValueError("Invalid db_url format")
-    
     def _init_db(self):
-        """DB 테이블 초기화"""
-        is_sqlite = isinstance(self.db_url, str)
-        
-        create_table_sql = """
-            CREATE TABLE IF NOT EXISTS corps (
-                corp_code VARCHAR(8) PRIMARY KEY,
-                corp_name VARCHAR(100) NOT NULL,
-                stock_code VARCHAR(6),
-                is_listed BOOLEAN,
-                modified_at TIMESTAMP{tz},
-                last_update TIMESTAMP{tz}
-            )
-        """.format(tz="" if is_sqlite else " WITH TIME ZONE")
-        
-        with self._get_connection() as conn:
+        """DB 초기화"""
+        with psycopg2.connect(**self.db_config) as conn:
             with conn.cursor() as cur:
-                cur.execute(create_table_sql)
-            conn.commit()
+                # 기업 정보 테이블 생성
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS corps (
+                        id SERIAL PRIMARY KEY,
+                        corp_code VARCHAR(8) NOT NULL UNIQUE,
+                        corp_name VARCHAR(100) NOT NULL,
+                        stock_code VARCHAR(6),
+                        is_listed BOOLEAN DEFAULT FALSE,
+                        last_collection_at TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_corps_corp_code ON corps(corp_code);
+                    CREATE INDEX IF NOT EXISTS idx_corps_stock_code ON corps(stock_code);
+                """)
+                conn.commit()
     
     def upsert_corps(self, corps: List[Dict]) -> None:
         """
         기업 정보 업데이트 또는 삽입
         
         Args:
-            corps: 기업 정보 목록 [{'corp_code': str, 'corp_name': str, 'stock_code': str}, ...]
+            corps: 기업 정보 목록
+                [
+                    {
+                        'corp_code': str,  # 기업 고유번호
+                        'corp_name': str,  # 기업명
+                        'stock_code': str,  # 주식코드 (선택)
+                    },
+                    ...
+                ]
         """
         now = datetime.now()
-        is_sqlite = isinstance(self.db_url, str)
         
-        if is_sqlite:
-            upsert_sql = """
-                INSERT OR REPLACE INTO corps (
-                    corp_code, corp_name, stock_code, 
-                    is_listed, modified_at
-                )
-                VALUES (?, ?, ?, ?, ?)
-            """
-        else:
-            upsert_sql = """
-                INSERT INTO corps (
-                    corp_code, corp_name, stock_code, 
-                    is_listed, modified_at
-                )
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (corp_code) DO UPDATE SET
-                    corp_name = EXCLUDED.corp_name,
-                    stock_code = EXCLUDED.stock_code,
-                    is_listed = EXCLUDED.is_listed,
-                    modified_at = EXCLUDED.modified_at
-            """
-        
-        with self._get_connection() as conn:
+        with psycopg2.connect(**self.db_config) as conn:
             with conn.cursor() as cur:
                 for corp in corps:
-                    cur.execute(upsert_sql, (
+                    cur.execute("""
+                        INSERT INTO corps (
+                            corp_code, corp_name, stock_code, is_listed, last_collection_at
+                        ) VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (corp_code) DO UPDATE SET
+                            corp_name = EXCLUDED.corp_name,
+                            stock_code = EXCLUDED.stock_code,
+                            is_listed = EXCLUDED.is_listed,
+                            last_collection_at = EXCLUDED.last_collection_at
+                    """, (
                         corp['corp_code'],
                         corp['corp_name'],
                         corp.get('stock_code'),
                         bool(corp.get('stock_code')),  # 주식코드가 있으면 상장기업
                         now
                     ))
-            conn.commit()
+                conn.commit()
     
     def update_collection_timestamp(self, corp_code: str) -> None:
         """
@@ -116,17 +89,15 @@ class CorpManager:
             corp_code: 기업 고유번호
         """
         now = datetime.now()
-        is_sqlite = isinstance(self.db_url, str)
-        param_style = '?' if is_sqlite else '%s'
         
-        with self._get_connection() as conn:
+        with psycopg2.connect(**self.db_config) as conn:
             with conn.cursor() as cur:
-                cur.execute(f"""
+                cur.execute("""
                     UPDATE corps 
-                    SET last_update = {param_style}
-                    WHERE corp_code = {param_style}
+                    SET last_collection_at = %s
+                    WHERE corp_code = %s
                 """, (now, corp_code))
-            conn.commit()
+                conn.commit()
     
     def get_all_corps(self, only_listed: bool = False) -> List[Dict]:
         """
@@ -138,19 +109,34 @@ class CorpManager:
         Returns:
             List[Dict]: 기업 목록
         """
-        with self._get_connection() as conn:
-            if isinstance(self.db_url, str):
-                # SQLite
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-            else:
-                # PostgreSQL
-                cur = conn.cursor(cursor_factory=DictCursor)
+        with psycopg2.connect(**self.db_config) as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                if only_listed:
+                    cur.execute("""
+                        SELECT * FROM corps 
+                        WHERE is_listed = TRUE 
+                        ORDER BY corp_name
+                    """)
+                else:
+                    cur.execute("SELECT * FROM corps ORDER BY corp_name")
+                
+                return [dict(row) for row in cur.fetchall()]
+    
+    def get_corp(self, corp_code: str) -> Optional[Dict]:
+        """
+        기업 정보 조회
+        
+        Args:
+            corp_code: 기업 고유번호
             
-            query = "SELECT * FROM corps"
-            if only_listed:
-                query += " WHERE is_listed = true"
-            query += " ORDER BY last_update ASC NULLS FIRST"
-            
-            cur.execute(query)
-            return [dict(row) for row in cur.fetchall()] 
+        Returns:
+            Optional[Dict]: 기업 정보
+        """
+        with psycopg2.connect(**self.db_config) as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM corps 
+                    WHERE corp_code = %s
+                """, (corp_code,))
+                row = cur.fetchone()
+                return dict(row) if row else None 

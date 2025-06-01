@@ -11,18 +11,20 @@ from psycopg2.extras import DictCursor
 
 from joopjoop.dart import DartClient, DartCollector
 from joopjoop.rag import RAGPipeline
-from tests.dart.models_for_test import DartReport
+from joopjoop.dart.utils import parse_date
 
 # 프로젝트 루트 디렉토리 찾기
 def find_project_root() -> Path:
+    """프로젝트 루트 디렉토리 찾기"""
     current = Path(__file__).resolve().parent
     while current.name != "JoopJoopBot" and current.parent != current:
         current = current.parent
     return current
 
-# 환경변수 로드
-project_root = find_project_root()
-load_dotenv(project_root / ".env")
+@pytest.fixture(scope="session")
+def project_root():
+    """프로젝트 루트 경로"""
+    return find_project_root()
 
 # DART 보고서 타입 그룹 정의
 REPORT_GROUPS = {
@@ -47,12 +49,156 @@ REPORT_GROUPS = {
     }
 }
 
+class TestDartCollector:
+    @pytest.fixture(autouse=True)
+    def setup(self, temp_db_connection, temp_vector_store_path, dart_api_key):
+        """테스트 환경 설정"""
+        self.db_conn = temp_db_connection
+        self.vector_store_path = temp_vector_store_path
+        self.client = DartClient(dart_api_key)
+        
+        # RAG 파이프라인 초기화
+        self.rag_pipeline = RAGPipeline(self.vector_store_path)
+        
+        # DartCollector 초기화
+        self.collector = DartCollector(
+            db_connection=self.db_conn,
+            rag_pipeline=self.rag_pipeline,
+            vector_store_enabled=True
+        )
+    
+    def test_process_document(self):
+        """문서 처리 테스트"""
+        # 테스트용 문서 데이터
+        test_date = datetime.now()
+        test_doc = {
+            'corp_code': 'TEST001',
+            'corp_name': '테스트기업',
+            'receipt_no': 'TEST_RCPT_001',
+            'report_type': '주요사항보고서',
+            'title': '테스트 공시',
+            'content': '이 문서는 테스트를 위한 공시 문서입니다.',
+            'disclosure_date': test_date.strftime("%Y-%m-%d"),  # DB 저장용 포맷
+            'dcm_no': 'TEST_DCM_001',
+            'url': 'http://test.com',
+            'file_name': 'test.pdf',
+            'page_count': 1
+        }
+        
+        # 문서 처리
+        success = self.collector.process_document(test_doc)
+        assert success is True
+        
+        # DB에 저장되었는지 확인
+        with self.db_conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM dart_reports 
+                WHERE receipt_no = %s
+            """, ('TEST_RCPT_001',))
+            result = cur.fetchone()
+            
+            assert result is not None
+            assert result['corp_code'] == 'TEST001'
+            assert result['corp_name'] == '테스트기업'
+            assert result['report_type'] == '주요사항보고서'
+            assert result['title'] == '테스트 공시'
+    
+    def test_process_duplicate_document(self):
+        """중복 문서 처리 테스트"""
+        # 테스트용 문서 데이터
+        test_date = datetime.now()
+        test_doc = {
+            'corp_code': 'TEST002',
+            'corp_name': '테스트기업2',
+            'receipt_no': 'TEST_RCPT_002',
+            'report_type': '주요사항보고서',
+            'title': '테스트 공시2',
+            'content': '이 문서는 테스트를 위한 공시 문서입니다.',
+            'disclosure_date': test_date.strftime("%Y-%m-%d"),  # DB 저장용 포맷
+            'dcm_no': 'TEST_DCM_001',
+            'url': 'http://test.com',
+            'file_name': 'test.pdf',
+            'page_count': 1
+        }
+        
+        # 첫 번째 처리
+        success1 = self.collector.process_document(test_doc)
+        assert success1 is True
+        
+        # 두 번째 처리 (중복)
+        success2 = self.collector.process_document(test_doc)
+        assert success2 is False
+        
+        # DB에 하나만 저장되었는지 확인
+        with self.db_conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FROM dart_reports 
+                WHERE receipt_no = %s
+            """, ('TEST_RCPT_002',))
+            count = cur.fetchone()[0]
+            assert count == 1
+    
+    @pytest.mark.asyncio
+    async def test_collect_recent_reports(self):
+        """최근 보고서 수집 테스트"""
+        # 삼성전자 최근 공시 수집
+        corp_code = "00126380"  # 삼성전자
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=30)
+        
+        # 공시 목록 조회
+        disclosures = await self.client.get_disclosure_list(
+            corp_code=corp_code,
+            start_date=start_date.strftime("%Y%m%d"),  # API 요청용 포맷
+            end_date=end_date.strftime("%Y%m%d")      # API 요청용 포맷
+        )
+        
+        assert len(disclosures) > 0
+        
+        # 첫 번째 공시 상세 조회 및 처리
+        first_disc = disclosures[0]
+        document = await self.client.get_document(first_disc['rcept_no'])
+        
+        assert document is not None
+        
+        # 문서 형식 변환
+        rcept_dt = datetime.strptime(first_disc.get('rcept_dt', end_date.strftime("%Y%m%d")), '%Y%m%d')
+        processed_document = {
+            'corp_code': corp_code,
+            'corp_name': document['corp_name'],
+            'receipt_no': document['receipt_no'],
+            'report_type': first_disc.get('report_nm', '기타'),
+            'title': document['title'],
+            'content': document['content'],
+            'disclosure_date': rcept_dt.strftime("%Y-%m-%d"),  # DB 저장용 포맷
+            'dcm_no': document.get('dcm_no', ''),
+            'url': f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={document['receipt_no']}",
+            'file_name': f"{document['receipt_no']}.pdf",
+            'page_count': 1
+        }
+        
+        # 문서 처리
+        success = self.collector.process_document(processed_document)
+        assert success is True
+        
+        # DB에 저장되었는지 확인
+        with self.db_conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM dart_reports 
+                WHERE receipt_no = %s
+            """, (first_disc['rcept_no'],))
+            result = cur.fetchone()
+            
+            assert result is not None
+            assert result['corp_code'] == corp_code
+            assert result['receipt_no'] == first_disc['rcept_no']
+
 @pytest.mark.integration
 class TestDartCollection:
     @pytest.fixture(autouse=True)
-    def setup(self, pg_test_config, temp_vector_store_path, dart_api_key):
+    def setup(self, temp_db_config, temp_vector_store_path, dart_api_key):
         """테스트 환경 설정"""
-        self.db_config = pg_test_config
+        self.db_config = temp_db_config
         self.vector_store_path = temp_vector_store_path
         self.client = DartClient(dart_api_key)
         self.pipeline = RAGPipeline(str(self.vector_store_path))

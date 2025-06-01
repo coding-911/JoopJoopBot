@@ -3,16 +3,12 @@ import os
 import asyncio
 from typing import List, Dict
 import logging
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+import psycopg2
+from psycopg2.extras import DictCursor
 
 from joopjoop.dart import DartClient, DartCollector
 from joopjoop.dart.corp_manager import CorpManager
 from joopjoop.rag import RAGPipeline
-from joopjoop.models import DartReport
-
-
-
 
 # 환경변수
 DART_API_KEY = os.getenv("DART_API_KEY")
@@ -26,11 +22,6 @@ DB_CONFIG = {
     'password': os.getenv('POSTGRES_PASSWORD'),
     'port': int(os.getenv('POSTGRES_PORT'))
 }
-
-# SQLAlchemy 엔진 및 세션 설정
-DATABASE_URL = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 ALERT_EMAIL = os.getenv("AIRFLOW_ALERT_EMAIL")
 
@@ -159,34 +150,30 @@ def process_documents(documents: List[Dict]) -> None:
     if not documents:
         return
 
-    # DB 세션 생성
-    db = SessionLocal()
-    try:
-        # RAG 파이프라인 초기화 (벡터 저장소)
-        rag_pipeline = RAGPipeline(VECTOR_STORE_PATH)
-        
-        # DartCollector 초기화
-        collector = DartCollector(
-            db=db,
-            report_model=DartReport,
-            rag_pipeline=rag_pipeline,
-            vector_store_enabled=True  # 벡터 저장소 활성화
-        )
-        
-        # 각 문서 처리
-        for doc in documents:
-            try:
-                success = collector.process_document(doc)
-                if success:
-                    logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
-                else:
-                    logger.warning(f"문서 처리 실패 또는 중복: {doc.get('title')}")
-            except Exception as e:
-                logger.error(f"문서 처리 중 오류 발생: {str(e)}")
-                continue
-                
-    finally:
-        db.close()
+    # PostgreSQL 연결
+    with psycopg2.connect(**DB_CONFIG, cursor_factory=DictCursor) as conn:
+        with conn.cursor() as cur:
+            # RAG 파이프라인 초기화
+            rag_pipeline = RAGPipeline(VECTOR_STORE_PATH)
+            
+            # DartCollector 초기화
+            collector = DartCollector(
+                db_connection=conn,
+                rag_pipeline=rag_pipeline,
+                vector_store_enabled=True  # 벡터 저장소 활성화
+            )
+            
+            # 각 문서 처리
+            for doc in documents:
+                try:
+                    success = collector.process_document(doc)
+                    if success:
+                        logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
+                    else:
+                        logger.warning(f"문서 처리 실패 또는 중복: {doc.get('title')}")
+                except Exception as e:
+                    logger.error(f"문서 처리 중 오류 발생: {str(e)}")
+                    continue
 
 def run_update_corps():
     """기업 목록 업데이트 실행"""
