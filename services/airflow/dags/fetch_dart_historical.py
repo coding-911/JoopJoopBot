@@ -4,8 +4,9 @@ from airflow.models import Variable
 import asyncio
 from typing import List, Dict
 import logging
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+import psycopg2
+from psycopg2.extras import DictCursor
+from datetime import datetime, timedelta
 
 from dart_common import (
     default_args,
@@ -15,14 +16,10 @@ from dart_common import (
     RAGPipeline,
     DART_API_KEY,
     VECTOR_STORE_PATH,
-    DATABASE_URL
+    DB_CONFIG
 )
 
 logger = logging.getLogger(__name__)
-
-# SQLAlchemy 세션 설정
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 모든 중요 보고서 타입 통합
 ALL_REPORT_TYPES = {}
@@ -45,15 +42,15 @@ async def fetch_historical_disclosures(
             end_date=end_date
         )
         
-        # 중요 공시만 필터링
-        important_disclosures = [
+        # 중요 보고서만 필터링
+        filtered_disclosures = [
             disc for disc in disclosures
             if disc.get('report_tp') in ALL_REPORT_TYPES
         ]
         
         # 각 공시의 상세 내용 조회
         results = []
-        for disc in important_disclosures:
+        for disc in filtered_disclosures:
             try:
                 document = await client.get_document(disc['rcept_no'])
                 if document:
@@ -61,7 +58,6 @@ async def fetch_historical_disclosures(
                     document['report_type'] = ALL_REPORT_TYPES.get(
                         disc.get('report_tp'), '기타'
                     )
-                    document['collection_group'] = 'historical'
                     document['disclosure_date'] = disc.get('rcept_dt')
                     results.append(document)
                     logger.info(f"문서 수집 성공: {disc.get('report_nm')} ({disc.get('rcept_no')})")
@@ -80,56 +76,63 @@ def process_historical_documents(documents: List[Dict]) -> None:
     if not documents:
         return
 
-    # DB 세션 생성
-    db = SessionLocal()
-    try:
-        # RAG 파이프라인 초기화
-        rag_pipeline = RAGPipeline(VECTOR_STORE_PATH)
-        
-        # DartCollector 초기화
-        collector = DartCollector(
-            db=db,
-            rag_pipeline=rag_pipeline,
-            vector_store_enabled=True
-        )
-        
-        # 각 문서 처리
-        for doc in documents:
-            try:
-                success = collector.process_document(doc)
-                if success:
-                    logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
-                else:
-                    logger.warning(f"문서 처리 실패 또는 중복: {doc.get('title')}")
-            except Exception as e:
-                logger.error(f"문서 처리 중 오류 발생: {str(e)}")
-                continue
-                
-    finally:
-        db.close()
+    # PostgreSQL 연결
+    with psycopg2.connect(**DB_CONFIG, cursor_factory=DictCursor) as conn:
+        with conn.cursor() as cur:
+            # RAG 파이프라인 초기화
+            rag_pipeline = RAGPipeline(VECTOR_STORE_PATH)
+            
+            # DartCollector 초기화
+            collector = DartCollector(
+                db_connection=conn,
+                rag_pipeline=rag_pipeline,
+                vector_store_enabled=True
+            )
+            
+            # 각 문서 처리
+            for doc in documents:
+                try:
+                    success = collector.process_document(doc)
+                    if success:
+                        logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
+                    else:
+                        logger.warning(f"문서 처리 실패 또는 중복: {doc.get('title')}")
+                except Exception as e:
+                    logger.error(f"문서 처리 중 오류 발생: {str(e)}")
+                    continue
 
 def run_fetch_historical_disclosures(corp_codes: List[str], **context):
-    """과거 공시 조회 및 처리 실행"""
-    # 이미 수집된 기업 목록 가져오기
-    collected_corps = Variable.get("collected_corps", deserialize_json=True, default=[])
+    """과거 공시 수집 실행"""
+    # 수집 기간 설정 (1년)
+    end_date = datetime.now().strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
+    
+    # 진행 상황 추적을 위한 변수
+    processed_corps = Variable.get("processed_corps", default_var=[], deserialize_json=True)
+    failed_corps = Variable.get("failed_corps", default_var=[], deserialize_json=True)
     
     for corp_code in corp_codes:
-        # 이미 수집된 기업은 스킵
-        if corp_code in collected_corps:
-            logger.info(f"이미 수집된 기업 스킵: {corp_code}")
+        if corp_code in processed_corps:
+            logger.info(f"이미 처리된 기업 건너뛰기: {corp_code}")
             continue
             
         try:
-            # 과거 1년치 공시 수집
-            documents = asyncio.run(fetch_historical_disclosures(corp_code))
+            documents = asyncio.run(fetch_historical_disclosures(
+                corp_code=corp_code,
+                start_date=start_date,
+                end_date=end_date
+            ))
+            
             if documents:
                 process_historical_documents(documents)
-                # 수집 완료된 기업 저장
-                collected_corps.append(corp_code)
-                Variable.set("collected_corps", collected_corps, serialize_json=True)
-                logger.info(f"기업 데이터 수집 완료: {corp_code}")
+                processed_corps.append(corp_code)
+                Variable.set("processed_corps", processed_corps, serialize_json=True)
+                logger.info(f"기업 과거 데이터 수집 완료: {corp_code}")
+            
         except Exception as e:
-            logger.error(f"기업 데이터 수집 실패: {corp_code} - {str(e)}")
+            logger.error(f"기업 과거 데이터 수집 실패: {corp_code} - {str(e)}")
+            failed_corps.append(corp_code)
+            Variable.set("failed_corps", failed_corps, serialize_json=True)
 
 # DAG 정의
 with DAG(
