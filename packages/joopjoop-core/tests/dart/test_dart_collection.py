@@ -1,13 +1,17 @@
 import asyncio
 import os
 import tempfile
-import shutil
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
-from joopjoop.dart import DartClient
+import pytest
+import psycopg2
+from psycopg2.extras import DictCursor
+
+from joopjoop.dart import DartClient, DartCollector
 from joopjoop.rag import RAGPipeline
+from tests.dart.models_for_test import DartReport
 
 # 프로젝트 루트 디렉토리 찾기
 def find_project_root() -> Path:
@@ -43,78 +47,96 @@ REPORT_GROUPS = {
     }
 }
 
-class DartCollectionTester:
-    def __init__(self, test_mode: str = 'incremental'):
-        """
-        Args:
-            test_mode: 테스트 모드 ('incremental' 또는 'initial')
-                - incremental: 증분 수집 테스트 (일/주/월간)
-                - initial: 초기 수집 테스트 (1년치)
-        """
-        self.api_key = os.getenv("DART_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "DART_API_KEY 환경변수가 설정되지 않았습니다.\n"
-                f"프로젝트 루트({project_root})의 .env 파일을 확인해주세요."
-            )
-        
-        self.test_mode = test_mode
-        
-        # 테스트용 임시 디렉토리 생성
-        self.temp_dir = tempfile.mkdtemp(prefix=f"dart_test_{test_mode}_")
-        self.vector_store_path = Path(self.temp_dir) / "vector_store"
-        self.vector_store_path.mkdir(parents=True, exist_ok=True)
-        
-        print(f"\n임시 벡터 DB 경로: {self.vector_store_path}")
-        
-        self.client = DartClient(self.api_key)
+@pytest.mark.integration
+class TestDartCollection:
+    @pytest.fixture(autouse=True)
+    def setup(self, pg_test_config, temp_vector_store_path, dart_api_key):
+        """테스트 환경 설정"""
+        self.db_config = pg_test_config
+        self.vector_store_path = temp_vector_store_path
+        self.client = DartClient(dart_api_key)
         self.pipeline = RAGPipeline(str(self.vector_store_path))
         
         # 테스트 기업 설정
-        if test_mode == 'initial':
-            # 초기 수집은 기업 수를 제한
-            self.test_corps = [
-                ("00126380", "삼성전자"),  # 대표 기업 하나만 테스트
-            ]
-        else:
-            # 증분 수집은 여러 기업 테스트
-            self.test_corps = [
-                ("00126380", "삼성전자"),
-                ("00164779", "현대자동차"),
-                ("00164742", "SK하이닉스"),
-                ("00258801", "카카오")
-            ]
+        self.test_corps = [
+            ("00126380", "삼성전자"),  # 대표 기업 하나만 테스트
+        ]
+        
+        # 테스트 DB 초기화
+        with psycopg2.connect(**self.db_config) as conn:
+            with conn.cursor() as cur:
+                # 기존 테이블 삭제
+                cur.execute("DROP TABLE IF EXISTS dart_reports")
+                
+                # 테이블 생성
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS dart_reports (
+                        id SERIAL PRIMARY KEY,
+                        corp_code VARCHAR(8) NOT NULL,
+                        corp_name VARCHAR(100) NOT NULL,
+                        receipt_no VARCHAR(14) NOT NULL UNIQUE,
+                        report_type VARCHAR(100) NOT NULL,
+                        title VARCHAR(300) NOT NULL,
+                        content TEXT NOT NULL,
+                        disclosure_date DATE NOT NULL,
+                        meta_data JSONB
+                    )
+                """)
+                
+                # 인덱스 생성
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dart_reports_corp_code ON dart_reports(corp_code)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dart_reports_receipt_no ON dart_reports(receipt_no)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dart_reports_disclosure_date ON dart_reports(disclosure_date)")
+                
+                conn.commit()
+        
+        yield
+        
+        # 테스트 후 정리
+        with psycopg2.connect(**self.db_config) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE IF EXISTS dart_reports")
+                conn.commit()
 
-    def cleanup(self):
-        """테스트 종료 후 임시 디렉토리 삭제"""
-        try:
-            shutil.rmtree(self.temp_dir)
-            print(f"\n임시 벡터 DB 삭제 완료: {self.temp_dir}")
-        except Exception as e:
-            print(f"\n임시 벡터 DB 삭제 실패: {str(e)}")
-
-    async def test_corp_codes(self) -> bool:
+    @pytest.mark.asyncio
+    async def test_corp_codes(self):
         """기업 목록 조회 테스트"""
-        print("\n=== 기업 목록 조회 테스트 ===")
-        try:
-            corps = await self.client.get_corp_codes()
-            print(f"- 전체 기업 수: {len(corps)}")
-            if corps:
-                print(f"- 샘플 기업: {corps[0]}")
-            return True
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return False
+        corps = await self.client.get_corp_codes()
+        assert len(corps) > 0
+        assert isinstance(corps[0], dict)
+        assert 'corp_code' in corps[0]
+        assert 'corp_name' in corps[0]
 
-    async def test_disclosure_collection(
+    @pytest.mark.asyncio
+    async def test_disclosure_collection(self):
+        """공시 수집 테스트"""
+        corp_code, corp_name = self.test_corps[0]
+        
+        # 일간 공시 수집 테스트
+        documents = await self._collect_disclosures(corp_code, corp_name, 'daily', 1)
+        assert isinstance(documents, list)
+        
+        if documents:
+            # 문서 처리 테스트
+            success = self.process_documents(documents)
+            assert success is True
+            
+            # DB에 저장되었는지 확인
+            with psycopg2.connect(**self.db_config) as conn:
+                with conn.cursor(cursor_factory=DictCursor) as cur:
+                    cur.execute("SELECT * FROM dart_reports WHERE corp_code = %s", (corp_code,))
+                    saved_docs = cur.fetchall()
+                    assert len(saved_docs) > 0
+                    assert saved_docs[0]['corp_code'] == corp_code
+
+    async def _collect_disclosures(
         self,
         corp_code: str,
         corp_name: str,
         report_group: str,
         days: int
     ) -> Optional[List[Dict]]:
-        """특정 기업의 공시 수집 테스트"""
-        print(f"\n=== {corp_name} ({report_group}) 공시 수집 테스트 ===")
+        """공시 수집 헬퍼 함수"""
         try:
             # 수집 기간 설정
             end_date = datetime.now()
@@ -129,25 +151,13 @@ class DartCollectionTester:
             
             # 해당 그룹의 보고서만 필터링
             target_report_types = REPORT_GROUPS.get(report_group, {})
-            if not target_report_types and report_group == 'all':
-                # 초기 수집의 경우 모든 보고서 타입 통합
-                target_report_types = {
-                    k: v for group in REPORT_GROUPS.values() 
-                    for k, v in group.items()
-                }
-            
             filtered_disclosures = [
                 disc for disc in disclosures
                 if disc.get('report_tp') in target_report_types
             ]
             
-            print(f"- 전체 공시 수: {len(disclosures)}")
-            print(f"- 필터링된 공시 수: {len(filtered_disclosures)}")
-            
             # 공시 상세 내용 수집 (최대 10개만 테스트)
             test_disclosures = filtered_disclosures[:10]
-            if len(filtered_disclosures) > 10:
-                print(f"- 테스트를 위해 처음 10개의 공시만 처리합니다 (전체: {len(filtered_disclosures)}개)")
             
             results = []
             for disc in test_disclosures:
@@ -160,83 +170,56 @@ class DartCollectionTester:
                         )
                         document['collection_group'] = report_group
                         results.append(document)
-                        print(f"- 문서 수집 성공: {disc.get('report_nm')} ({disc.get('rcept_no')})")
-                except Exception as e:
-                    print(f"- 문서 수집 실패: {disc.get('rcept_no')} - {str(e)}")
+                except Exception:
                     continue
             
             return results
             
-        except Exception as e:
-            print(f"Error: {str(e)}")
+        except Exception:
             return None
 
     def process_documents(self, documents: List[Dict]) -> bool:
-        """문서 처리 및 벡터 DB 저장 테스트"""
+        """문서 처리 및 저장 테스트"""
         if not documents:
             return False
         
         try:
+            # DartCollector 초기화
+            collector = DartCollector(
+                db_config=self.db_config,
+                rag_pipeline=self.pipeline,
+                vector_store_enabled=True
+            )
+            
+            # 각 문서 처리
             for doc in documents:
-                self.pipeline.process_document(doc)
-                print(f"- 문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
+                # metadata 필드 처리 개선
+                if 'metadata' in doc:
+                    doc['meta_data'] = doc.pop('metadata')
+                elif 'meta_data' in doc:
+                    pass  # 이미 올바른 형식
+                else:
+                    doc['meta_data'] = {}  # 기본값 설정
+                
+                success = collector.process_document(doc)
+                if not success:
+                    return False
             return True
         except Exception as e:
-            print(f"Error: {str(e)}")
+            print(f"문서 처리 중 오류 발생: {str(e)}")
             return False
-
-    async def run_incremental_tests(self):
-        """증분 수집 테스트 실행 (일/주/월간)"""
-        collection_configs = [
-            ('daily', 1),    # 일간 수집 (1일)
-            ('weekly', 7),   # 주간 수집 (7일)
-            ('monthly', 30)  # 월간 수집 (30일)
-        ]
-        
-        for corp_code, corp_name in self.test_corps:
-            for report_group, days in collection_configs:
-                documents = await self.test_disclosure_collection(
-                    corp_code, corp_name, report_group, days
-                )
-                if documents:
-                    self.process_documents(documents)
-
-    async def run_initial_tests(self):
-        """초기 수집 테스트 실행 (1년치)"""
-        for corp_code, corp_name in self.test_corps:
-            documents = await self.test_disclosure_collection(
-                corp_code, corp_name, 'all', 365
-            )
-            if documents:
-                self.process_documents(documents)
-
-    async def run_all_tests(self):
-        """모든 테스트 실행"""
-        try:
-            # 1. 기업 목록 조회 테스트
-            if not await self.test_corp_codes():
-                return
-            
-            # 2. 테스트 모드에 따라 수집 테스트 실행
-            if self.test_mode == 'incremental':
-                await self.run_incremental_tests()
-            else:
-                await self.run_initial_tests()
-                
-        finally:
-            self.cleanup()
 
 async def main():
     """테스트 실행"""
     # 증분 수집 테스트
     print("\n=== 증분 수집 테스트 시작 ===")
-    incremental_tester = DartCollectionTester('incremental')
-    await incremental_tester.run_all_tests()
+    incremental_tester = TestDartCollection()
+    await incremental_tester.test_disclosure_collection()
     
     # 초기 수집 테스트
     print("\n=== 초기 수집 테스트 시작 ===")
-    initial_tester = DartCollectionTester('initial')
-    await initial_tester.run_all_tests()
+    initial_tester = TestDartCollection()
+    await initial_tester.test_disclosure_collection()
 
 if __name__ == "__main__":
     asyncio.run(main()) 

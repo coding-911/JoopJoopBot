@@ -10,8 +10,10 @@ DAG_FILE = "dart_daily.py"
 
 class TestDartDailyDag:
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, temp_db_session, temp_vector_store_path):
         """테스트 환경 설정"""
+        self.db = temp_db_session
+        self.vector_store_path = temp_vector_store_path
         self.dagbag = DagBag(dag_folder=DAG_PATH, include_examples=False)
     
     def test_dag_loaded(self):
@@ -69,4 +71,41 @@ class TestDartDailyDag:
         assert dag.schedule_interval == "0 0 * * *"  # UTC 기준
         
         # 시작 날짜가 과거로 설정되어 있는지 확인
-        assert dag.start_date <= days_ago(1) 
+        assert dag.start_date <= days_ago(1)
+
+    @pytest.mark.integration
+    def test_document_processing(self, temp_db_session):
+        """문서 처리 태스크 테스트"""
+        dag = self.dagbag.get_dag(dag_id="dart_daily")
+        task = dag.get_task("process_documents")
+        
+        # 테스트용 문서 데이터
+        test_documents = [{
+            'corp_code': 'TEST001',
+            'corp_name': '테스트기업',
+            'receipt_no': 'TEST_RCPT_001',
+            'report_type': '주요사항보고서',
+            'title': '테스트 공시',
+            'content': '이 문서는 테스트를 위한 공시 문서입니다.',
+            'disclosure_date': '2024-01-01',
+            'meta_data': {}  # 기본 메타데이터 추가
+        }]
+        
+        # 태스크 실행
+        context = {
+            'task_instance': None,
+            'execution_date': datetime.now(),
+            'documents': test_documents
+        }
+        
+        try:
+            task.execute(context)
+            
+            # DB에 저장되었는지 확인
+            from joopjoop.models import DartReport
+            saved_report = temp_db_session.query(DartReport).first()
+            assert saved_report is not None
+            assert saved_report.corp_code == 'TEST001'
+            assert saved_report.title == '테스트 공시'
+        except Exception as e:
+            pytest.fail(f"문서 처리 테스트 실패: {str(e)}") 

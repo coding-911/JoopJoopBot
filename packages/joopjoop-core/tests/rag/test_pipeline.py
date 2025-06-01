@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List
 from dotenv import load_dotenv
+import pytest
 from joopjoop.rag import RAGPipeline
 
 # 프로젝트 루트 디렉토리 찾기
@@ -17,24 +18,21 @@ def find_project_root() -> Path:
 project_root = find_project_root()
 load_dotenv(project_root / ".env")
 
+@pytest.mark.integration
 class TestRAGPipeline:
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup(self, temp_vector_store_path):
         """테스트 환경 설정"""
-        # 임시 벡터 DB 디렉토리 생성
-        self.temp_dir = tempfile.mkdtemp(prefix="rag_test_")
-        self.vector_store_path = Path(self.temp_dir) / "vector_store"
-        self.vector_store_path.mkdir(parents=True, exist_ok=True)
-        
-        print(f"\n임시 벡터 DB 경로: {self.vector_store_path}")
-        
-        # RAG 파이프라인 초기화
+        self.vector_store_path = temp_vector_store_path
         self.pipeline = RAGPipeline(str(self.vector_store_path))
+        
+        yield
     
     def teardown_method(self):
         """테스트 종료 후 정리"""
         try:
-            shutil.rmtree(self.temp_dir)
-            print(f"\n임시 벡터 DB 삭제 완료: {self.temp_dir}")
+            shutil.rmtree(self.vector_store_path)
+            print(f"\n임시 벡터 DB 삭제 완료: {self.vector_store_path}")
         except Exception as e:
             print(f"\n임시 벡터 DB 삭제 실패: {str(e)}")
     
