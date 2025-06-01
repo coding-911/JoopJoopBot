@@ -115,3 +115,6 @@ Thumbs.db
 
 # PR 문서
 pr/
+
+# Cursor
+.cursor/
