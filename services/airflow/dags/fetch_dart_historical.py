@@ -4,19 +4,25 @@ from airflow.models import Variable
 import asyncio
 from typing import List, Dict
 import logging
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from dart_common import (
     default_args,
     REPORT_GROUPS,
     DartClient,
+    DartCollector,
     RAGPipeline,
     DART_API_KEY,
     VECTOR_STORE_PATH,
-    process_documents,
-    run_fetch_corps
+    DATABASE_URL
 )
 
 logger = logging.getLogger(__name__)
+
+# SQLAlchemy 세션 설정
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 모든 중요 보고서 타입 통합
 ALL_REPORT_TYPES = {}
@@ -56,6 +62,7 @@ async def fetch_historical_disclosures(
                         disc.get('report_tp'), '기타'
                     )
                     document['collection_group'] = 'historical'
+                    document['disclosure_date'] = disc.get('rcept_dt')
                     results.append(document)
                     logger.info(f"문서 수집 성공: {disc.get('report_nm')} ({disc.get('rcept_no')})")
             except Exception as e:
@@ -67,6 +74,39 @@ async def fetch_historical_disclosures(
     except Exception as e:
         logger.error(f"기업 공시 목록 조회 실패 (기업코드: {corp_code}): {str(e)}")
         return []
+
+def process_historical_documents(documents: List[Dict]) -> None:
+    """과거 문서 처리 및 저장"""
+    if not documents:
+        return
+
+    # DB 세션 생성
+    db = SessionLocal()
+    try:
+        # RAG 파이프라인 초기화
+        rag_pipeline = RAGPipeline(VECTOR_STORE_PATH)
+        
+        # DartCollector 초기화
+        collector = DartCollector(
+            db=db,
+            rag_pipeline=rag_pipeline,
+            vector_store_enabled=True
+        )
+        
+        # 각 문서 처리
+        for doc in documents:
+            try:
+                success = collector.process_document(doc)
+                if success:
+                    logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
+                else:
+                    logger.warning(f"문서 처리 실패 또는 중복: {doc.get('title')}")
+            except Exception as e:
+                logger.error(f"문서 처리 중 오류 발생: {str(e)}")
+                continue
+                
+    finally:
+        db.close()
 
 def run_fetch_historical_disclosures(corp_codes: List[str], **context):
     """과거 공시 조회 및 처리 실행"""
@@ -83,7 +123,7 @@ def run_fetch_historical_disclosures(corp_codes: List[str], **context):
             # 과거 1년치 공시 수집
             documents = asyncio.run(fetch_historical_disclosures(corp_code))
             if documents:
-                process_documents(documents)
+                process_historical_documents(documents)
                 # 수집 완료된 기업 저장
                 collected_corps.append(corp_code)
                 Variable.set("collected_corps", collected_corps, serialize_json=True)
@@ -91,23 +131,17 @@ def run_fetch_historical_disclosures(corp_codes: List[str], **context):
         except Exception as e:
             logger.error(f"기업 데이터 수집 실패: {corp_code} - {str(e)}")
 
+# DAG 정의
 with DAG(
     'fetch_dart_historical',
     default_args=default_args,
-    description='DART 과거 데이터 수집 및 벡터 DB 저장',
+    description='과거 DART 공시 데이터 수집',
     schedule_interval=None,  # 수동 실행
-    catchup=False
+    tags=['dart', 'historical']
 ) as dag:
-
-    fetch_corps_task = PythonOperator(
-        task_id='fetch_corps',
-        python_callable=run_fetch_corps,
-    )
-
-    fetch_historical_task = PythonOperator(
+    
+    fetch_historical = PythonOperator(
         task_id='fetch_historical_disclosures',
         python_callable=run_fetch_historical_disclosures,
-        op_kwargs={'corp_codes': "{{ task_instance.xcom_pull(task_ids='fetch_corps') }}"},
-    )
-
-    fetch_corps_task >> fetch_historical_task 
+        op_kwargs={'corp_codes': []},  # 실행 시 기업 코드 목록 전달
+    ) 

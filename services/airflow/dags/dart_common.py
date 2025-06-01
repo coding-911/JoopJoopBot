@@ -3,15 +3,35 @@ import os
 import asyncio
 from typing import List, Dict
 import logging
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-from joopjoop.dart import DartClient
+from joopjoop.dart import DartClient, DartCollector
 from joopjoop.dart.corp_manager import CorpManager
 from joopjoop.rag import RAGPipeline
+from joopjoop.models import DartReport
+
+
+
 
 # 환경변수
 DART_API_KEY = os.getenv("DART_API_KEY")
 VECTOR_STORE_PATH = os.getenv("VECTOR_DB_PATH", "/opt/airflow/vector_store")
-CORPS_DB_PATH = os.getenv("CORPS_DB_PATH", "/opt/airflow/data/corps.db")
+
+# PostgreSQL 설정
+DB_CONFIG = {
+    'host': os.getenv('POSTGRES_HOST'),
+    'dbname': os.getenv('POSTGRES_DB'),
+    'user': os.getenv('POSTGRES_USER'),
+    'password': os.getenv('POSTGRES_PASSWORD'),
+    'port': int(os.getenv('POSTGRES_PORT'))
+}
+
+# SQLAlchemy 엔진 및 세션 설정
+DATABASE_URL = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 ALERT_EMAIL = os.getenv("AIRFLOW_ALERT_EMAIL")
 
 # 보고서 타입 그룹
@@ -61,7 +81,7 @@ default_args = {
 async def update_corps() -> None:
     """기업 목록 업데이트"""
     client = DartClient(DART_API_KEY)
-    corp_manager = CorpManager(CORPS_DB_PATH)
+    corp_manager = CorpManager(DB_CONFIG)
     
     try:
         corps = await client.get_corp_codes()
@@ -73,7 +93,7 @@ async def update_corps() -> None:
 
 def get_corps(only_listed: bool = False) -> List[Dict]:
     """기업 목록 조회"""
-    corp_manager = CorpManager(CORPS_DB_PATH)
+    corp_manager = CorpManager(DB_CONFIG)
     corps = corp_manager.get_all_corps(only_listed=only_listed)
     logger.info(f"기업 목록 조회 완료: {len(corps)}개 기업")
     return corps
@@ -81,7 +101,7 @@ def get_corps(only_listed: bool = False) -> List[Dict]:
 async def fetch_disclosures(corp: Dict, report_group: str) -> List[Dict]:
     """공시 목록 및 상세 조회"""
     client = DartClient(DART_API_KEY)
-    corp_manager = CorpManager(CORPS_DB_PATH)
+    corp_manager = CorpManager(DB_CONFIG)
     
     try:
         # 보고서 그룹에 따른 수집 기간 설정
@@ -117,6 +137,7 @@ async def fetch_disclosures(corp: Dict, report_group: str) -> List[Dict]:
                     document['corp_name'] = corp['corp_name']
                     document['corp_code'] = corp['corp_code']
                     document['stock_code'] = corp.get('stock_code')
+                    document['disclosure_date'] = disc.get('rcept_dt')
                     results.append(document)
                     logger.info(f"문서 수집 성공: {disc.get('report_nm')} ({disc.get('rcept_no')})")
             except Exception as e:
@@ -130,18 +151,42 @@ async def fetch_disclosures(corp: Dict, report_group: str) -> List[Dict]:
         return results
     
     except Exception as e:
-        logger.error(f"기업 공시 목록 조회 실패 (기업: {corp['corp_name']}): {str(e)}")
+        logger.error(f"기업 공시 목록 조회 실패 (기업코드: {corp['corp_code']}): {str(e)}")
         return []
 
 def process_documents(documents: List[Dict]) -> None:
-    """문서 처리 및 벡터 DB 저장"""
-    pipeline = RAGPipeline(VECTOR_STORE_PATH)
-    for doc in documents:
-        try:
-            pipeline.process_document(doc)
-            logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
-        except Exception as e:
-            logger.error(f"문서 처리 실패: {doc.get('title')} - {str(e)}")
+    """문서 처리 및 저장"""
+    if not documents:
+        return
+
+    # DB 세션 생성
+    db = SessionLocal()
+    try:
+        # RAG 파이프라인 초기화 (벡터 저장소)
+        rag_pipeline = RAGPipeline(VECTOR_STORE_PATH)
+        
+        # DartCollector 초기화
+        collector = DartCollector(
+            db=db,
+            report_model=DartReport,
+            rag_pipeline=rag_pipeline,
+            vector_store_enabled=True  # 벡터 저장소 활성화
+        )
+        
+        # 각 문서 처리
+        for doc in documents:
+            try:
+                success = collector.process_document(doc)
+                if success:
+                    logger.info(f"문서 처리 성공: {doc.get('title')} ({doc.get('report_type')})")
+                else:
+                    logger.warning(f"문서 처리 실패 또는 중복: {doc.get('title')}")
+            except Exception as e:
+                logger.error(f"문서 처리 중 오류 발생: {str(e)}")
+                continue
+                
+    finally:
+        db.close()
 
 def run_update_corps():
     """기업 목록 업데이트 실행"""
