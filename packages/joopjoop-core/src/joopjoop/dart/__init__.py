@@ -1,5 +1,10 @@
-from .client import DartClient
-from .collector import DartCollector
-from .corp_manager import CorpManager
+"""
+DART (Data Analysis, Retrieval and Transfer) module
+"""
 
-__all__ = ['DartClient', 'DartCollector', 'CorpManager'] 
+from .collector import DartCollector
+from .client import DartClient
+from .corp_manager import CorpManager
+from .utils import *
+
+__all__ = ['DartCollector', 'DartClient', 'CorpManager'] 

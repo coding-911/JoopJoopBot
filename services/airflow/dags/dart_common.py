@@ -6,7 +6,8 @@ import logging
 import psycopg2
 from psycopg2.extras import DictCursor
 
-from joopjoop.dart import DartClient, DartCollector
+from joopjoop.dart.client import DartClient
+from joopjoop.dart.collector import DartCollector
 from joopjoop.dart.corp_manager import CorpManager
 from joopjoop.rag import RAGPipeline
 
@@ -20,7 +21,7 @@ DB_CONFIG = {
     'dbname': os.getenv('POSTGRES_DB'),
     'user': os.getenv('POSTGRES_USER'),
     'password': os.getenv('POSTGRES_PASSWORD'),
-    'port': int(os.getenv('POSTGRES_PORT'))
+    'port': int(os.getenv('POSTGRES_PORT') or 15432)
 }
 
 ALERT_EMAIL = os.getenv("AIRFLOW_ALERT_EMAIL")
