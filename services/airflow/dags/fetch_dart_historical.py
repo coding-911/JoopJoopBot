@@ -16,7 +16,9 @@ from dart_common import (
     RAGPipeline,
     DART_API_KEY,
     VECTOR_STORE_PATH,
-    DB_CONFIG
+    DB_CONFIG,
+    get_corps,
+    update_corps
 )
 
 logger = logging.getLogger(__name__)
@@ -101,34 +103,35 @@ def process_historical_documents(documents: List[Dict]) -> None:
                     logger.error(f"문서 처리 중 오류 발생: {str(e)}")
                     continue
 
-def run_fetch_historical_disclosures(corp_codes: List[str], **context):
-    """과거 공시 수집 실행"""
+def run_update_corps_task():
+    """DART API에서 기업 목록을 받아 DB에 저장"""
+    asyncio.run(update_corps())
+
+def run_fetch_historical_disclosures_task(**context):
+    """DB에 저장된 기업 목록을 기준으로 보고서 수집"""
     # 수집 기간 설정 (1년)
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
-    
-    # 진행 상황 추적을 위한 변수
+    # DB에서 기업 목록 조회
+    corps = get_corps()
+    corp_codes = [corp['corp_code'] for corp in corps]
     processed_corps = Variable.get("processed_corps", default_var=[], deserialize_json=True)
     failed_corps = Variable.get("failed_corps", default_var=[], deserialize_json=True)
-    
     for corp_code in corp_codes:
         if corp_code in processed_corps:
             logger.info(f"이미 처리된 기업 건너뛰기: {corp_code}")
             continue
-            
         try:
             documents = asyncio.run(fetch_historical_disclosures(
                 corp_code=corp_code,
                 start_date=start_date,
                 end_date=end_date
             ))
-            
             if documents:
                 process_historical_documents(documents)
                 processed_corps.append(corp_code)
                 Variable.set("processed_corps", processed_corps, serialize_json=True)
                 logger.info(f"기업 과거 데이터 수집 완료: {corp_code}")
-            
         except Exception as e:
             logger.error(f"기업 과거 데이터 수집 실패: {corp_code} - {str(e)}")
             failed_corps.append(corp_code)
@@ -142,9 +145,12 @@ with DAG(
     schedule_interval=None,  # 수동 실행
     tags=['dart', 'historical']
 ) as dag:
-    
-    fetch_historical = PythonOperator(
+    update_corps_task = PythonOperator(
+        task_id='update_corps',
+        python_callable=run_update_corps_task,
+    )
+    fetch_historical_task = PythonOperator(
         task_id='fetch_historical_disclosures',
-        python_callable=run_fetch_historical_disclosures,
-        op_kwargs={'corp_codes': []},  # 실행 시 기업 코드 목록 전달
-    ) 
+        python_callable=run_fetch_historical_disclosures_task,
+    )
+    update_corps_task >> fetch_historical_task 
