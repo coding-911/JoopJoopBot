@@ -8,6 +8,8 @@
 *.swp
 *.swo
 .DS_Store
+.cursor/
+pr/
 
 # Python
 __pycache__/
@@ -41,10 +43,50 @@ yarn-error.log*
 docs/
 *.md
 !README.md
-.cursor/
-pr/
 
-# Keep
-!services/
-!packages/
+# Service specific ignores
+# Ignore everything first
+*
+
+# Then selectively allow required files/directories
+# Core package
+!packages/joopjoop-core/
+packages/joopjoop-core/**/__pycache__/
+packages/joopjoop-core/**/*.pyc
+packages/joopjoop-core/dist/
+packages/joopjoop-core/build/
+packages/joopjoop-core/*.egg-info/
+
+# Backend service
+!services/backend/
+services/backend/**/__pycache__/
+services/backend/**/*.pyc
+services/backend/dist/
+services/backend/build/
+services/backend/*.egg-info/
+
+# Frontend service
+!services/frontend/
+services/frontend/node_modules/
+services/frontend/dist/
+services/frontend/build/
+services/frontend/.next/
+services/frontend/.cache/
+
+# Airflow service
+!services/airflow/
+services/airflow/**/__pycache__/
+services/airflow/**/*.pyc
+services/airflow/logs/
+services/airflow/plugins/
+services/airflow/*.egg-info/
+
+# Scripts
 !scripts/
+scripts/**/__pycache__/
+scripts/**/*.pyc
+
+venv/
+data/
+packages/joopjoop-core/.venv/
+packages/joopjoop-core/venv/

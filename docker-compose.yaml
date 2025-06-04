@@ -4,10 +4,13 @@ x-airflow-common: &airflow-common
     dockerfile: services/airflow/Dockerfile
     args:
       PYTHON_VERSION: "3.11"
+  user: "${AIRFLOW_UID}:${AIRFLOW_GID}"
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
     AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${AIRFLOW_POSTGRES_DB}
+    PYTHONPATH: /packages/joopjoop-core/src
     AIRFLOW_ALERT_EMAIL: ${AIRFLOW_ALERT_EMAIL}
     AIRFLOW_TASK_RETRIES: ${AIRFLOW_TASK_RETRIES}
     AIRFLOW_RETRY_DELAY_MINUTES: ${AIRFLOW_RETRY_DELAY_MINUTES}
@@ -15,16 +18,17 @@ x-airflow-common: &airflow-common
     DART_API_KEY: ${DART_API_KEY}
     VECTOR_DB_PATH: ${AIRFLOW_VECTOR_DB_PATH}
     POSTGRES_HOST: ${POSTGRES_HOST}
+    POSTGRES_PORT: ${POSTGRES_PORT}
     POSTGRES_USER: ${AIRFLOW_POSTGRES_USER}
     POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD}
     POSTGRES_DB: ${AIRFLOW_POSTGRES_DB}
     LOG_LEVEL: ${LOG_LEVEL}
   volumes:
+    # Airflow 관련 디렉토리
     - ./services/airflow/dags:/opt/airflow/dags
     - ./services/airflow/logs:/opt/airflow/logs
     - ./services/airflow/plugins:/opt/airflow/plugins
     - ./services/airflow/vector_store:/opt/airflow/vector_store
-    - ./packages/joopjoop-core:/packages/joopjoop-core:ro
   depends_on: &airflow-common-depends-on
     postgres:
       condition: service_healthy
@@ -90,22 +94,22 @@ services:
     volumes:
       - ./services/backend:/app
       - ./data/vector_store:/data/vector_store
-      - ./packages/joopjoop-core:/packages/joopjoop-core:ro
     depends_on:
       - postgres
       - redis
 
-  web:
+  frontend:
     build:
       context: .
-      dockerfile: services/web/Dockerfile
+      dockerfile: services/frontend/Dockerfile
     ports:
-      - "${VITE_PORT}:5173"
+      - "${VITE_PORT}:${VITE_PORT}"
     volumes:
-      - ./services/web:/app
+      - ./services/frontend:/app
       - /app/node_modules
     environment:
-      - REACT_APP_API_URL=${REACT_APP_API_URL}
+      - VITE_API_URL=${VITE_API_URL}
+      - VITE_PORT=${VITE_PORT}
     depends_on:
       - api
 
@@ -133,13 +137,24 @@ services:
 
   airflow-init:
     <<: *airflow-common
+    user: "${AIRFLOW_UID}:${AIRFLOW_GID}"
     entrypoint: /bin/bash
     command:
       - -c
       - |
-        mkdir -p /sources/logs /sources/dags /sources/plugins
-        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
-        exec airflow db init
+        airflow db migrate &&
+        airflow users create \
+          --username ${AIRFLOW_ADMIN_USERNAME} \
+          --firstname ${AIRFLOW_ADMIN_FIRSTNAME} \
+          --lastname ${AIRFLOW_ADMIN_LASTNAME} \
+          --role ${AIRFLOW_ADMIN_ROLE} \
+          --email ${AIRFLOW_ADMIN_EMAIL} \
+          --password ${AIRFLOW_ADMIN_PASSWORD}
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   grafana:
     image: grafana/grafana:latest

@@ -3,7 +3,7 @@ from airflow.operators.python import PythonOperator
 
 from dart_common import (
     default_args,
-    run_fetch_corps,
+    run_update_corps,
     run_fetch_disclosures
 )
 
@@ -16,14 +16,13 @@ with DAG(
 ) as dag:
     fetch_corps_task = PythonOperator(
         task_id='fetch_corps',
-        python_callable=run_fetch_corps,
+        python_callable=run_update_corps,
     )
     
     fetch_disclosures_task = PythonOperator(
         task_id='fetch_disclosures',
         python_callable=run_fetch_disclosures,
         op_kwargs={
-            'corp_codes': "{{ task_instance.xcom_pull(task_ids='fetch_corps') }}",
             'report_group': 'weekly'
         },
     )
